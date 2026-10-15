@@ -880,7 +880,7 @@ export const useProductivityStore = create<ProductivityState>()(
             currentQueue.filter((q) => q.table === 'sticky_notes').map((q) => q.entityId)
           );
 
-          // Se a nuvem estiver vazia, tenta semear com as áreas padrão
+          // 1. Áreas: Semear ou mesclar com a nuvem
           if (Array.isArray(cloudAreas) && cloudAreas.length === 0) {
             const initialAreas = get().areas.length > 0 ? get().areas : DEFAULT_AREAS;
             const seedPayload = initialAreas.map(areaToCloud);
@@ -889,7 +889,6 @@ export const useProductivityStore = create<ProductivityState>()(
               console.warn('[Cloud Sync] Aviso ao semear áreas no Supabase (verifique RLS):', seedErr.message);
             }
           } else if (Array.isArray(cloudAreas) && cloudAreas.length > 0) {
-            // Preserva documentos locais caso a tabela de áreas do Supabase não possua a coluna de documentos
             const localAreas = get().areas;
             const mappedAreas: Area[] = cloudAreas.map((row) => {
               const base = cloudToArea(row);
@@ -905,71 +904,103 @@ export const useProductivityStore = create<ProductivityState>()(
               return base;
             });
 
+            // Preserva áreas locais que ainda não estão na nuvem e sobe para o Supabase
             const localOnlyAreas = localAreas.filter(
-              (la) => !mappedAreas.some((ma) => ma.id === la.id) && pendingAreaIds.has(la.id)
+              (la) => !mappedAreas.some((ma) => ma.id === la.id)
             );
+
+            if (localOnlyAreas.length > 0) {
+              supabase.from('areas').upsert(localOnlyAreas.map(areaToCloud)).then(() => {}, () => {});
+            }
 
             set({ areas: [...mappedAreas, ...localOnlyAreas] });
           }
 
+          // 2. Tarefas: Semear ou mesclar com a nuvem
           if (Array.isArray(cloudTasks)) {
             const localTasks = get().tasks;
-            const remoteTasks = cloudTasks.map(cloudToTask);
 
-            // Mesclagem Inteligente (Smart Merge):
-            const mergedTasks = remoteTasks.map((rt) => {
-              const localMatch = localTasks.find((lt) => lt.id === rt.id);
-              if (!localMatch) return rt;
-              // Se há pendência de sincronização local desta tarefa, respeita a versão local
-              if (pendingTaskIds.has(rt.id)) return localMatch;
-              // Se a versão local foi modificada mais recentemente que a nuvem, mantém a local
-              const localTime = new Date(localMatch.updatedAt || localMatch.createdAt).getTime();
-              const remoteTime = new Date(rt.updatedAt || rt.createdAt).getTime();
-              return localTime > remoteTime ? localMatch : rt;
-            });
+            if (cloudTasks.length === 0 && localTasks.length > 0) {
+              // Se a nuvem não tem tarefas ainda, envia todas as tarefas locais existentes
+              const seedTasks = localTasks.map(taskToCloud);
+              const { error: taskSeedErr } = await supabase.from('tasks').upsert(seedTasks);
+              if (taskSeedErr) {
+                console.warn('[Cloud Sync] Aviso ao semear tarefas no Supabase (verifique RLS):', taskSeedErr.message);
+              }
+            } else {
+              const remoteTasks = cloudTasks.map(cloudToTask);
 
-            // Preserva tarefas que só existem localmente (criadas offline)
-            const localOnlyTasks = localTasks.filter(
-              (lt) => !mergedTasks.some((mt) => mt.id === lt.id) && pendingTaskIds.has(lt.id)
-            );
+              // Mesclagem Inteligente (Smart Merge):
+              const mergedTasks = remoteTasks.map((rt) => {
+                const localMatch = localTasks.find((lt) => lt.id === rt.id);
+                if (!localMatch) return rt;
+                if (pendingTaskIds.has(rt.id)) return localMatch;
+                const localTime = new Date(localMatch.updatedAt || localMatch.createdAt).getTime();
+                const remoteTime = new Date(rt.updatedAt || rt.createdAt).getTime();
+                return localTime > remoteTime ? localMatch : rt;
+              });
 
-            // Filtra tarefas marcadas para exclusão pendente
-            const pendingDeletions = new Set(
-              currentQueue.filter((q) => q.table === 'tasks' && q.action === 'delete').map((q) => q.entityId)
-            );
+              // Preserva tarefas criadas localmente que ainda não estão na nuvem
+              const pendingDeletions = new Set(
+                currentQueue.filter((q) => q.table === 'tasks' && q.action === 'delete').map((q) => q.entityId)
+              );
 
-            const finalTasks = [...localOnlyTasks, ...mergedTasks].filter(
-              (t) => !pendingDeletions.has(t.id)
-            );
+              const localOnlyTasks = localTasks.filter(
+                (lt) => !mergedTasks.some((mt) => mt.id === lt.id) && !pendingDeletions.has(lt.id)
+              );
 
-            set({ tasks: finalTasks });
+              // Sobe tarefas locais para a nuvem se ainda não estavam lá
+              if (localOnlyTasks.length > 0) {
+                supabase.from('tasks').upsert(localOnlyTasks.map(taskToCloud)).then(() => {}, () => {});
+              }
+
+              const finalTasks = [...localOnlyTasks, ...mergedTasks].filter(
+                (t) => !pendingDeletions.has(t.id)
+              );
+
+              set({ tasks: finalTasks });
+            }
           }
 
+          // 3. Notas do Mural: Semear ou mesclar com a nuvem
           if (Array.isArray(cloudNotes)) {
             const localNotes = get().stickyNotes;
-            const remoteNotes = cloudNotes.map(cloudToNote);
 
-            const mergedNotes = remoteNotes.map((rn) => {
-              const localMatch = localNotes.find((ln) => ln.id === rn.id);
-              if (localMatch && pendingNoteIds.has(rn.id)) {
-                return localMatch;
+            if (cloudNotes.length === 0 && localNotes.length > 0) {
+              const seedNotes = localNotes.map(noteToCloud);
+              const { error: noteSeedErr } = await supabase.from('sticky_notes').upsert(seedNotes);
+              if (noteSeedErr) {
+                console.warn('[Cloud Sync] Aviso ao semear notas no Supabase (verifique RLS):', noteSeedErr.message);
               }
-              return rn;
-            });
+            } else {
+              const remoteNotes = cloudNotes.map(cloudToNote);
 
-            const localOnlyNotes = localNotes.filter(
-              (ln) => !mergedNotes.some((mn) => mn.id === ln.id) && pendingNoteIds.has(ln.id)
-            );
+              const mergedNotes = remoteNotes.map((rn) => {
+                const localMatch = localNotes.find((ln) => ln.id === rn.id);
+                if (localMatch && pendingNoteIds.has(rn.id)) {
+                  return localMatch;
+                }
+                return rn;
+              });
 
-            const pendingNoteDeletions = new Set(
-              currentQueue.filter((q) => q.table === 'sticky_notes' && q.action === 'delete').map((q) => q.entityId)
-            );
+              const pendingNoteDeletions = new Set(
+                currentQueue.filter((q) => q.table === 'sticky_notes' && q.action === 'delete').map((q) => q.entityId)
+              );
 
-            set({
-              stickyNotes: [...localOnlyNotes, ...mergedNotes].filter(
-                (n) => !pendingNoteDeletions.has(n.id)
-              ),
-            });
+              const localOnlyNotes = localNotes.filter(
+                (ln) => !mergedNotes.some((mn) => mn.id === ln.id) && !pendingNoteDeletions.has(ln.id)
+              );
+
+              if (localOnlyNotes.length > 0) {
+                supabase.from('sticky_notes').upsert(localOnlyNotes.map(noteToCloud)).then(() => {}, () => {});
+              }
+
+              set({
+                stickyNotes: [...localOnlyNotes, ...mergedNotes].filter(
+                  (n) => !pendingNoteDeletions.has(n.id)
+                ),
+              });
+            }
           }
 
           set({ isCloudConnected: true });
