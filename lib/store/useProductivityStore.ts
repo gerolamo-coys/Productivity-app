@@ -13,6 +13,7 @@ import {
   WorkspaceView,
   EffortLevel,
   PauseContext,
+  SyncQueueItem,
 } from '@/types/productivity';
 
 // ==========================================
@@ -110,62 +111,259 @@ function cloudToNote(row: any): StickyNote {
   };
 }
 
-// Disparos assíncronos em segundo plano para persistência na nuvem sem travar a interface
+// ==========================================
+// Gerenciador de Fila Offline e Sincronização em Nuvem (Supabase)
+// ==========================================
+
+function addToSyncQueue(item: Omit<SyncQueueItem, 'id' | 'timestamp'>) {
+  try {
+    const store = useProductivityStore.getState();
+    const newItem: SyncQueueItem = {
+      ...item,
+      id: `sync-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      timestamp: Date.now(),
+    };
+    const currentQueue = store.pendingSyncQueue || [];
+    const filtered = currentQueue.filter(
+      (q) => !(q.entityId === item.entityId && q.table === item.table)
+    );
+    useProductivityStore.setState({
+      pendingSyncQueue: [...filtered, newItem],
+    });
+  } catch (e) {
+    console.warn('[Offline Queue] Erro ao enfileirar ação offline:', e);
+  }
+}
+
+function removeFromSyncQueue(entityId: string, table: string) {
+  try {
+    const store = useProductivityStore.getState();
+    const currentQueue = store.pendingSyncQueue || [];
+    useProductivityStore.setState({
+      pendingSyncQueue: currentQueue.filter(
+        (q) => !(q.entityId === entityId && q.table === table)
+      ),
+    });
+  } catch (e) {
+    console.warn('[Offline Queue] Erro ao remover da fila offline:', e);
+  }
+}
+
+// Disparos assíncronos em segundo plano com tolerância a falhas offline
 async function syncAreaToCloud(area: Area) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    addToSyncQueue({
+      table: 'areas',
+      action: 'upsert',
+      entityId: area.id,
+      payload: areaToCloud(area),
+    });
+    return;
+  }
+
   try {
     const { error } = await supabase.from('areas').upsert(areaToCloud(area));
-    if (error) console.warn('[Cloud Sync] Falha ao sincronizar Área:', error.message);
+    if (error) {
+      console.warn('[Cloud Sync] Falha ao sincronizar Área:', error.message);
+      addToSyncQueue({
+        table: 'areas',
+        action: 'upsert',
+        entityId: area.id,
+        payload: areaToCloud(area),
+      });
+    } else {
+      removeFromSyncQueue(area.id, 'areas');
+    }
   } catch (err) {
     console.warn('[Cloud Sync] Erro de rede na Área:', err);
+    addToSyncQueue({
+      table: 'areas',
+      action: 'upsert',
+      entityId: area.id,
+      payload: areaToCloud(area),
+    });
   }
 }
 
 async function deleteAreaFromCloud(areaId: string) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    addToSyncQueue({
+      table: 'areas',
+      action: 'delete',
+      entityId: areaId,
+    });
+    return;
+  }
+
   try {
     const { error } = await supabase.from('areas').delete().eq('id', areaId);
-    if (error) console.warn('[Cloud Sync] Falha ao excluir Área na nuvem:', error.message);
+    if (error) {
+      console.warn('[Cloud Sync] Falha ao excluir Área na nuvem:', error.message);
+      addToSyncQueue({
+        table: 'areas',
+        action: 'delete',
+        entityId: areaId,
+      });
+    } else {
+      removeFromSyncQueue(areaId, 'areas');
+    }
   } catch (err) {
     console.warn('[Cloud Sync] Erro de rede ao excluir Área:', err);
+    addToSyncQueue({
+      table: 'areas',
+      action: 'delete',
+      entityId: areaId,
+    });
   }
 }
 
 async function syncTaskToCloud(task: Task) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    addToSyncQueue({
+      table: 'tasks',
+      action: 'upsert',
+      entityId: task.id,
+      payload: taskToCloud(task),
+    });
+    return;
+  }
+
   try {
     const { error } = await supabase.from('tasks').upsert(taskToCloud(task));
-    if (error) console.warn('[Cloud Sync] Falha ao sincronizar Tarefa:', error.message);
+    if (error) {
+      console.warn('[Cloud Sync] Falha ao sincronizar Tarefa:', error.message);
+      addToSyncQueue({
+        table: 'tasks',
+        action: 'upsert',
+        entityId: task.id,
+        payload: taskToCloud(task),
+      });
+    } else {
+      removeFromSyncQueue(task.id, 'tasks');
+    }
   } catch (err) {
     console.warn('[Cloud Sync] Erro de rede na Tarefa:', err);
+    addToSyncQueue({
+      table: 'tasks',
+      action: 'upsert',
+      entityId: task.id,
+      payload: taskToCloud(task),
+    });
   }
 }
 
 async function deleteTaskFromCloud(taskId: string) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    addToSyncQueue({
+      table: 'tasks',
+      action: 'delete',
+      entityId: taskId,
+    });
+    return;
+  }
+
   try {
     const { error } = await supabase.from('tasks').delete().eq('id', taskId);
-    if (error) console.warn('[Cloud Sync] Falha ao excluir Tarefa na nuvem:', error.message);
+    if (error) {
+      console.warn('[Cloud Sync] Falha ao excluir Tarefa na nuvem:', error.message);
+      addToSyncQueue({
+        table: 'tasks',
+        action: 'delete',
+        entityId: taskId,
+      });
+    } else {
+      removeFromSyncQueue(taskId, 'tasks');
+    }
   } catch (err) {
     console.warn('[Cloud Sync] Erro de rede ao excluir Tarefa:', err);
+    addToSyncQueue({
+      table: 'tasks',
+      action: 'delete',
+      entityId: taskId,
+    });
   }
 }
 
 async function syncStickyNoteToCloud(note: StickyNote) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    addToSyncQueue({
+      table: 'sticky_notes',
+      action: 'upsert',
+      entityId: note.id,
+      payload: noteToCloud(note),
+    });
+    return;
+  }
+
   try {
     const { error } = await supabase.from('sticky_notes').upsert(noteToCloud(note));
-    if (error) console.warn('[Cloud Sync] Falha ao sincronizar Nota:', error.message);
+    if (error) {
+      console.warn('[Cloud Sync] Falha ao sincronizar Nota:', error.message);
+      addToSyncQueue({
+        table: 'sticky_notes',
+        action: 'upsert',
+        entityId: note.id,
+        payload: noteToCloud(note),
+      });
+    } else {
+      removeFromSyncQueue(note.id, 'sticky_notes');
+    }
   } catch (err) {
     console.warn('[Cloud Sync] Erro de rede na Nota:', err);
+    addToSyncQueue({
+      table: 'sticky_notes',
+      action: 'upsert',
+      entityId: note.id,
+      payload: noteToCloud(note),
+    });
   }
 }
 
 async function deleteStickyNoteFromCloud(noteId: string) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    addToSyncQueue({
+      table: 'sticky_notes',
+      action: 'delete',
+      entityId: noteId,
+    });
+    return;
+  }
+
   try {
     const { error } = await supabase.from('sticky_notes').delete().eq('id', noteId);
-    if (error) console.warn('[Cloud Sync] Falha ao excluir Nota na nuvem:', error.message);
+    if (error) {
+      console.warn('[Cloud Sync] Falha ao excluir Nota na nuvem:', error.message);
+      addToSyncQueue({
+        table: 'sticky_notes',
+        action: 'delete',
+        entityId: noteId,
+      });
+    } else {
+      removeFromSyncQueue(noteId, 'sticky_notes');
+    }
   } catch (err) {
     console.warn('[Cloud Sync] Erro de rede ao excluir Nota:', err);
+    addToSyncQueue({
+      table: 'sticky_notes',
+      action: 'delete',
+      entityId: noteId,
+    });
   }
 }
 
 async function clearStickyNotesFromCloud(areaId: string) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    const notesInArea = useProductivityStore.getState().stickyNotes.filter((n) => n.areaId === areaId);
+    notesInArea.forEach((n) => {
+      addToSyncQueue({
+        table: 'sticky_notes',
+        action: 'delete',
+        entityId: n.id,
+      });
+    });
+    return;
+  }
+
   try {
     const { error } = await supabase.from('sticky_notes').delete().eq('area_id', areaId);
     if (error) console.warn('[Cloud Sync] Falha ao limpar Notas na nuvem:', error.message);
@@ -183,10 +381,13 @@ interface ProductivityState {
   _hasHydrated: boolean;
   setHasHydrated: (state: boolean) => void;
 
-  // Status de Sincronização em Nuvem (Supabase)
+  // Status de Conexão e Sincronização em Nuvem (Supabase & Offline)
+  isOnline: boolean;
   isCloudConnected: boolean;
   isCloudSyncing: boolean;
+  pendingSyncQueue: SyncQueueItem[];
   fetchCloudData: () => Promise<void>;
+  flushPendingSyncQueue: () => Promise<void>;
   initCloudSync: () => () => void;
 
   areas: Area[];
@@ -534,8 +735,10 @@ export const useProductivityStore = create<ProductivityState>()(
       _hasHydrated: false,
       setHasHydrated: (state) => set({ _hasHydrated: state }),
 
+      isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
       isCloudConnected: false,
       isCloudSyncing: false,
+      pendingSyncQueue: [],
 
       areas: DEFAULT_AREAS,
       tasks: DEFAULT_TASKS,
@@ -593,12 +796,59 @@ export const useProductivityStore = create<ProductivityState>()(
       },
 
       // ==========================================
-      // Sincronização Inicial e Realtime Supabase
+      // Sincronização Inteligente e Fila Offline (Supabase)
       // ==========================================
 
+      flushPendingSyncQueue: async () => {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+        const queue = get().pendingSyncQueue;
+        if (!queue || queue.length === 0) return;
+
+        set({ isCloudSyncing: true });
+        const remainingQueue: SyncQueueItem[] = [];
+
+        for (const item of queue) {
+          try {
+            if (item.action === 'upsert' && item.payload) {
+              const { error } = await supabase.from(item.table).upsert(item.payload);
+              if (error) {
+                console.warn(`[Offline Queue] Falha ao sincronizar ${item.table}:`, error.message);
+                remainingQueue.push(item);
+              }
+            } else if (item.action === 'delete') {
+              const { error } = await supabase.from(item.table).delete().eq('id', item.entityId);
+              if (error) {
+                console.warn(`[Offline Queue] Falha ao deletar ${item.table}:`, error.message);
+                remainingQueue.push(item);
+              }
+            }
+          } catch (err) {
+            console.warn(`[Offline Queue] Erro de rede em ${item.table}:`, err);
+            remainingQueue.push(item);
+          }
+        }
+
+        set({
+          pendingSyncQueue: remainingQueue,
+          isCloudSyncing: false,
+        });
+
+        if (remainingQueue.length === 0 && queue.length > 0) {
+          get().showToast('✅ Todas as alterações offline foram sincronizadas com a nuvem!');
+        }
+      },
+
       fetchCloudData: async () => {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          set({ isCloudConnected: false, isCloudSyncing: false });
+          return;
+        }
+
         set({ isCloudSyncing: true });
         try {
+          // 1. Tenta descarregar primeiro qualquer alteração offline pendente
+          await get().flushPendingSyncQueue();
+
           const [areasRes, tasksRes, notesRes] = await Promise.all([
             supabase.from('areas').select('*').order('created_at', { ascending: true }),
             supabase.from('tasks').select('*').order('created_at', { ascending: false }),
@@ -619,6 +869,17 @@ export const useProductivityStore = create<ProductivityState>()(
           const cloudTasks = tasksRes.data;
           const cloudNotes = notesRes.data;
 
+          const currentQueue = get().pendingSyncQueue || [];
+          const pendingTaskIds = new Set(
+            currentQueue.filter((q) => q.table === 'tasks').map((q) => q.entityId)
+          );
+          const pendingAreaIds = new Set(
+            currentQueue.filter((q) => q.table === 'areas').map((q) => q.entityId)
+          );
+          const pendingNoteIds = new Set(
+            currentQueue.filter((q) => q.table === 'sticky_notes').map((q) => q.entityId)
+          );
+
           // Se a nuvem estiver vazia, tenta semear com as áreas padrão
           if (Array.isArray(cloudAreas) && cloudAreas.length === 0) {
             const initialAreas = get().areas.length > 0 ? get().areas : DEFAULT_AREAS;
@@ -633,20 +894,82 @@ export const useProductivityStore = create<ProductivityState>()(
             const mappedAreas: Area[] = cloudAreas.map((row) => {
               const base = cloudToArea(row);
               const localMatch = localAreas.find((a) => a.id === base.id);
-              if (localMatch && localMatch.documents && localMatch.documents.length > 0) {
-                base.documents = localMatch.documents;
+              if (localMatch) {
+                if (localMatch.documents && localMatch.documents.length > 0) {
+                  base.documents = localMatch.documents;
+                }
+                if (pendingAreaIds.has(base.id)) {
+                  return localMatch;
+                }
               }
               return base;
             });
-            set({ areas: mappedAreas });
+
+            const localOnlyAreas = localAreas.filter(
+              (la) => !mappedAreas.some((ma) => ma.id === la.id) && pendingAreaIds.has(la.id)
+            );
+
+            set({ areas: [...mappedAreas, ...localOnlyAreas] });
           }
 
-          if (Array.isArray(cloudTasks) && cloudTasks.length > 0) {
-            set({ tasks: cloudTasks.map(cloudToTask) });
+          if (Array.isArray(cloudTasks)) {
+            const localTasks = get().tasks;
+            const remoteTasks = cloudTasks.map(cloudToTask);
+
+            // Mesclagem Inteligente (Smart Merge):
+            const mergedTasks = remoteTasks.map((rt) => {
+              const localMatch = localTasks.find((lt) => lt.id === rt.id);
+              if (!localMatch) return rt;
+              // Se há pendência de sincronização local desta tarefa, respeita a versão local
+              if (pendingTaskIds.has(rt.id)) return localMatch;
+              // Se a versão local foi modificada mais recentemente que a nuvem, mantém a local
+              const localTime = new Date(localMatch.updatedAt || localMatch.createdAt).getTime();
+              const remoteTime = new Date(rt.updatedAt || rt.createdAt).getTime();
+              return localTime > remoteTime ? localMatch : rt;
+            });
+
+            // Preserva tarefas que só existem localmente (criadas offline)
+            const localOnlyTasks = localTasks.filter(
+              (lt) => !mergedTasks.some((mt) => mt.id === lt.id) && pendingTaskIds.has(lt.id)
+            );
+
+            // Filtra tarefas marcadas para exclusão pendente
+            const pendingDeletions = new Set(
+              currentQueue.filter((q) => q.table === 'tasks' && q.action === 'delete').map((q) => q.entityId)
+            );
+
+            const finalTasks = [...localOnlyTasks, ...mergedTasks].filter(
+              (t) => !pendingDeletions.has(t.id)
+            );
+
+            set({ tasks: finalTasks });
           }
 
-          if (Array.isArray(cloudNotes) && cloudNotes.length > 0) {
-            set({ stickyNotes: cloudNotes.map(cloudToNote) });
+          if (Array.isArray(cloudNotes)) {
+            const localNotes = get().stickyNotes;
+            const remoteNotes = cloudNotes.map(cloudToNote);
+
+            const mergedNotes = remoteNotes.map((rn) => {
+              const localMatch = localNotes.find((ln) => ln.id === rn.id);
+              if (localMatch && pendingNoteIds.has(rn.id)) {
+                return localMatch;
+              }
+              return rn;
+            });
+
+            const localOnlyNotes = localNotes.filter(
+              (ln) => !mergedNotes.some((mn) => mn.id === ln.id) && pendingNoteIds.has(ln.id)
+            );
+
+            const pendingNoteDeletions = new Set(
+              currentQueue.filter((q) => q.table === 'sticky_notes' && q.action === 'delete').map((q) => q.entityId)
+            );
+
+            set({
+              stickyNotes: [...localOnlyNotes, ...mergedNotes].filter(
+                (n) => !pendingNoteDeletions.has(n.id)
+              ),
+            });
           }
 
           set({ isCloudConnected: true });
@@ -659,8 +982,34 @@ export const useProductivityStore = create<ProductivityState>()(
       },
 
       initCloudSync: () => {
-        // Carrega dados iniciais da nuvem
-        get().fetchCloudData();
+        // Atualiza estado de conexão inicial
+        if (typeof navigator !== 'undefined') {
+          set({ isOnline: navigator.onLine });
+        }
+
+        // Carrega dados iniciais da nuvem se online
+        if (typeof navigator === 'undefined' || navigator.onLine) {
+          get().fetchCloudData();
+        }
+
+        // Listeners de Conexão de Rede do Navegador
+        const handleOnline = () => {
+          set({ isOnline: true });
+          get().showToast('🌐 Conexão restabelecida! Sincronizando com a nuvem...');
+          get().flushPendingSyncQueue().then(() => {
+            get().fetchCloudData();
+          });
+        };
+
+        const handleOffline = () => {
+          set({ isOnline: false, isCloudConnected: false });
+          get().showToast('📡 Modo offline ativo. Todas as alterações serão salvas localmente.');
+        };
+
+        if (typeof window !== 'undefined') {
+          window.addEventListener('online', handleOnline);
+          window.addEventListener('offline', handleOffline);
+        }
 
         // Inscreve-se nos canais de Realtime para atualizações imediatas entre Desktop e Mobile
         const channel = supabase
@@ -749,6 +1098,10 @@ export const useProductivityStore = create<ProductivityState>()(
           .subscribe();
 
         return () => {
+          if (typeof window !== 'undefined') {
+            window.removeEventListener('online', handleOnline);
+            window.removeEventListener('offline', handleOffline);
+          }
           supabase.removeChannel(channel);
         };
       },
@@ -1504,6 +1857,7 @@ export const useProductivityStore = create<ProductivityState>()(
         selectedAreaId: state.selectedAreaId,
         stickyNotes: state.stickyNotes,
         workspaceView: state.workspaceView,
+        pendingSyncQueue: state.pendingSyncQueue,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);

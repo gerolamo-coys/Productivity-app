@@ -95,3 +95,13 @@ export interface StickyNote {
 }
 
 export type WorkspaceView = 'tasks' | 'notes';
+
+export interface SyncQueueItem {
+  id: string;
+  table: 'areas' | 'tasks' | 'sticky_notes';
+  action: 'upsert' | 'delete';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  payload?: any;
+  entityId: string;
+  timestamp: number;
+}

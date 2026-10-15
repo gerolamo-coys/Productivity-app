@@ -28,6 +28,9 @@ export function AppHeader() {
     stickyNotes,
     isCloudConnected,
     isCloudSyncing,
+    isOnline,
+    pendingSyncQueue,
+    flushPendingSyncQueue,
     setIsVoiceDumpOpen,
   } = useProductivityStore();
 
@@ -46,6 +49,8 @@ export function AppHeader() {
     { id: 'active', label: 'Ativas' },
     { id: 'completed', label: 'Feitas' },
   ];
+
+  const pendingCount = pendingSyncQueue?.length || 0;
 
   return (
     <header className="border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-4 md:px-8 py-4">
@@ -95,31 +100,58 @@ export function AppHeader() {
                 </span>
               </button>
 
-              {/* Status de Sincronização em Nuvem (Supabase) */}
-              <div
-                className="text-[11px] px-2.5 py-0.5 rounded-full border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-850 text-neutral-500 dark:text-neutral-400 flex items-center gap-1.5 shadow-2xs font-medium"
+              {/* Status de Sincronização em Nuvem & Offline */}
+              <button
+                type="button"
+                onClick={() => isOnline && flushPendingSyncQueue()}
+                className={cn(
+                  'text-[11px] px-2.5 py-0.5 rounded-full border transition flex items-center gap-1.5 shadow-2xs font-medium',
+                  !isOnline
+                    ? 'border-rose-300 dark:border-rose-900/60 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400'
+                    : pendingCount > 0
+                    ? 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 cursor-pointer'
+                    : 'border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-850 text-neutral-500 dark:text-neutral-400'
+                )}
                 title={
-                  isCloudSyncing
+                  !isOnline
+                    ? `Modo Offline (${pendingCount} alteração(ões) salva(s) localmente)`
+                    : isCloudSyncing
                     ? 'Sincronizando com Supabase...'
+                    : pendingCount > 0
+                    ? `${pendingCount} alteração(ões) pendente(s). Clique para sincronizar agora.`
                     : isCloudConnected
                     ? 'Conectado à nuvem (Supabase Realtime ativo)'
-                    : 'Modo Local / Offline'
+                    : 'Modo Local'
                 }
               >
                 <span
                   className={cn(
                     'w-2 h-2 rounded-full shrink-0',
-                    isCloudSyncing
+                    !isOnline
+                      ? 'bg-rose-500'
+                      : isCloudSyncing
                       ? 'bg-amber-400 animate-pulse'
+                      : pendingCount > 0
+                      ? 'bg-amber-500'
                       : isCloudConnected
                       ? 'bg-emerald-500 shadow-xs'
                       : 'bg-neutral-400'
                   )}
                 />
                 <span className="hidden sm:inline">
-                  {isCloudSyncing ? 'Sincronizando...' : isCloudConnected ? 'Nuvem OK' : 'Local'}
+                  {!isOnline
+                    ? pendingCount > 0
+                      ? `Offline (${pendingCount})`
+                      : 'Offline'
+                    : isCloudSyncing
+                    ? 'Sincronizando...'
+                    : pendingCount > 0
+                    ? `Sincronizar (${pendingCount})`
+                    : isCloudConnected
+                    ? 'Nuvem OK'
+                    : 'Local'}
                 </span>
-              </div>
+              </button>
             </div>
             <p className="text-xs text-neutral-500 truncate max-w-xs md:max-w-md">
               {currentArea
